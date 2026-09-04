@@ -66,26 +66,73 @@ for this to be documented.)*
 ## Similarity threshold chosen
 
 - **Appearance tracking (within one video)**: a detection is matched to an
-  active track if embedding cosine similarity > 0.5, **or** if IOU > 0.3 *and*
+  active track if embedding cosine similarity > 0.5, **or** if IOU > 0.2 *and*
   the embedding similarity is at least 0 (i.e. not obviously a different
   person — see "Bugs found and fixed" below for why that floor exists).
   Greedy best-score assignment per frame. A track closes — finalizing one
-  `Appearance` — after 600ms with no match (≈3 dropped 5fps samples), which
-  is what lets a blurred whip-pan or a person leaving frame end a segment
-  instead of bridging it indefinitely. Stale tracks are closed *before*
-  matching each frame, not after (also covered below).
+  `Appearance` — after 1000ms with no match, which is what lets a blurred
+  whip-pan or a person leaving frame end a segment instead of bridging it
+  indefinitely, while tolerating a few consecutive missed detections during
+  fast head movement. Stale tracks are closed *before* matching each frame,
+  not after (also covered below).
 - **Identity clustering (across appearances)**: appearances are merged into
   the same person via greedy threshold clustering at cosine similarity >
   **0.5** against the running cluster centroid (`IdentityClusterer`, backed
   by the framework-free `GreedyClusterer`).
 
-Both are starting points, not final — the real embedding model's genuine
-(same-person) vs impostor (different-person) similarity distributions are
-what actually determine a good threshold, and you only know those by
-running it. **Tune against the Sample 1 worked example** (5 distinct
-people, each appearing 4 times, 20 appearances total, including two
-2-person overlapping segments) before trusting either value on Samples 2/3.
-The values live in `AppearanceTracker` and `IdentityClusterer` constructors.
+### How these were actually calibrated
+
+The Sample-1 simulation described below validated the *matching/clustering
+logic* against synthetic data, but not the real bundled model's actual
+similarity distribution — that can only come from running the real model.
+So the exact same alignment + preprocessing pipeline used on-device
+(`FaceAligner`'s 2-point transform → 112×112 → `(px-127.5)/128`) was run
+against `face_embedder.tflite` in Python, on real photos, to measure real
+genuine-vs-impostor cosine similarity:
+
+| Comparison | cosine similarity |
+|---|---|
+| Different people (real photos) | **-0.06** |
+| Same person, small alignment jitter (2-6° rotation / a few px, matching normal frame-to-frame landmark noise) | **0.51 – 0.85** |
+
+Two takeaways that directly shaped the values above:
+
+1. **Different-person similarity is strongly negative** — 0.5 has a wide,
+   safe margin as a clustering threshold. This ruled out the embedding
+   model itself as the source of the on-device over-merging seen earlier;
+   that was a tracker logic bug (see below), not weak embeddings.
+2. **Same-person similarity is far less stable than expected** — ordinary
+   landmark noise between adjacent 200ms video frames swings it from 0.85
+   down to 0.51, right at the matching threshold. `iouThreshold` (0.3→0.2)
+   and `maxGapMs` (600→1000) were loosened specifically so the IOU fallback
+   reliably carries a real appearance through the frames where the
+   embedding dips just under 0.5 instead of splitting it into a new track
+   — this was the direct cause of an on-device over-count (one person
+   reported as 9 appearances instead of 4).
+
+**Still tune against the Sample 1 worked example** (5 distinct people, each
+appearing 4 times, 20 appearances total, including two 2-person overlapping
+segments) before trusting either value on Samples 2/3 — two data points
+(one person pair) is a sanity check, not a full calibration. The values
+live in `AppearanceTracker` and `IdentityClusterer` constructors.
+
+### Clustering on best-observation embedding, not the track mean
+
+A real 5-person clip (Sample 2) exposed a second real bug: on-device it
+merged 5 people into 3 clusters. Re-running the real model on one clean,
+correctly-aligned frame per person (same alignment/preprocessing as
+on-device) showed all 5 separating fine — max pairwise similarity 0.47,
+comfortably under 0.5, including the two most visually similar people (both
+men, both wearing glasses, 0.38). So the model and threshold weren't at
+fault; the gap was that `IdentityClusterer` clustered on `Appearance.
+meanEmbedding` — the mean over *every* observation in a track, including
+the blurry, off-angle, and mid-turn frames a real appearance inevitably
+contains at 5fps. Averaging those in drags the appearance's representative
+point away from the person's true identity centre, enough to tip a
+borderline pair over threshold. Fixed by clustering on each appearance's
+*best-quality* observation instead (`IdentityClusterer.representativeEmbedding`,
+reusing `QualityScorer`'s existing frontality/sharpness ranking) — the same
+properties that make a good collage shot also make a trustworthy embedding.
 
 ### Bugs found and fixed while calibrating
 

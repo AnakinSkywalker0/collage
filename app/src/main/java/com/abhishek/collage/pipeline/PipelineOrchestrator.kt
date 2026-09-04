@@ -57,7 +57,11 @@ class PipelineOrchestrator(context: Context) {
         val perFrameDetected = frames.mapIndexed { index, frame ->
             val rawFaces = faceDetector.detect(frame.bitmap)
             val detected = rawFaces.map { raw ->
-                val collageCrop = FaceCropUtils.cropGenerous(frame.bitmap, raw.boundingBox)
+                // Other faces sharing this exact frame -- passed through so the
+                // generous collage crop backs off before it bleeds into a
+                // neighbour's face (see FaceCropUtils.expandedRect).
+                val otherBoxes = rawFaces.filter { it !== raw }.map { it.boundingBox }
+                val collageCrop = FaceCropUtils.cropGenerous(frame.bitmap, raw.boundingBox, otherFacesInFrame = otherBoxes)
                 val alignedCrop = FaceAligner.align(
                     frame.bitmap,
                     raw.boundingBox,
@@ -176,7 +180,9 @@ class PipelineOrchestrator(context: Context) {
         val sims = mutableListOf<Float>()
         for (i in appearances.indices) {
             for (j in i + 1 until appearances.size) {
-                sims.add(VectorMath.cosineSim(appearances[i].meanEmbedding, appearances[j].meanEmbedding))
+                val a = identityClusterer.representativeEmbedding(appearances[i])
+                val b = identityClusterer.representativeEmbedding(appearances[j])
+                sims.add(VectorMath.cosineSim(a, b))
             }
         }
         val aboveThreshold = sims.count { it > threshold }

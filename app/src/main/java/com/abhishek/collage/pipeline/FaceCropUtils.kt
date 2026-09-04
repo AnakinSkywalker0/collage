@@ -17,14 +17,43 @@ object FaceCropUtils {
      * Expands [bbox] by [marginRatio] on every side (relative to the box's own
      * width/height), clamps to the frame, and returns whether the resulting
      * box still touches an edge of the frame (used to flag likely-clipped faces).
+     *
+     * [otherFacesInFrame] -- the bounding boxes of every OTHER face detected in
+     * this same frame, if any. When two people share a frame (the assignment's
+     * own worked example has this: two people overlapping for over a second),
+     * a blind 50%-margin expansion around one person's box can reach straight
+     * into their neighbour's face -- producing a collage tile that visibly
+     * shows two different people. Each directional margin is capped at half
+     * the gap to the nearest face on that side, so the crop still fills out
+     * generously wherever there's no one nearby, but never crosses into
+     * someone else's face.
      */
-    fun expandedRect(frame: Bitmap, bbox: Rect, marginRatio: Float = DEFAULT_MARGIN_RATIO): Rect {
-        val marginX = (bbox.width() * marginRatio).toInt()
-        val marginY = (bbox.height() * marginRatio).toInt()
-        val left = (bbox.left - marginX).coerceIn(0, frame.width - 1)
-        val top = (bbox.top - marginY).coerceIn(0, frame.height - 1)
-        val right = (bbox.right + marginX).coerceIn(left + 1, frame.width)
-        val bottom = (bbox.bottom + marginY).coerceIn(top + 1, frame.height)
+    fun expandedRect(
+        frame: Bitmap,
+        bbox: Rect,
+        marginRatio: Float = DEFAULT_MARGIN_RATIO,
+        otherFacesInFrame: List<Rect> = emptyList()
+    ): Rect {
+        var marginLeft = bbox.width() * marginRatio
+        var marginRight = marginLeft
+        var marginTop = bbox.height() * marginRatio
+        var marginBottom = marginTop
+
+        for (other in otherFacesInFrame) {
+            val gapRight = (other.left - bbox.right).toFloat()
+            if (gapRight in 0f..marginRight) marginRight = (gapRight / 2f).coerceAtLeast(0f)
+            val gapLeft = (bbox.left - other.right).toFloat()
+            if (gapLeft in 0f..marginLeft) marginLeft = (gapLeft / 2f).coerceAtLeast(0f)
+            val gapBottom = (other.top - bbox.bottom).toFloat()
+            if (gapBottom in 0f..marginBottom) marginBottom = (gapBottom / 2f).coerceAtLeast(0f)
+            val gapTop = (bbox.top - other.bottom).toFloat()
+            if (gapTop in 0f..marginTop) marginTop = (gapTop / 2f).coerceAtLeast(0f)
+        }
+
+        val left = (bbox.left - marginLeft.toInt()).coerceIn(0, frame.width - 1)
+        val top = (bbox.top - marginTop.toInt()).coerceIn(0, frame.height - 1)
+        val right = (bbox.right + marginRight.toInt()).coerceIn(left + 1, frame.width)
+        val bottom = (bbox.bottom + marginBottom.toInt()).coerceIn(top + 1, frame.height)
         return Rect(left, top, right, bottom)
     }
 
@@ -44,8 +73,13 @@ object FaceCropUtils {
      */
     const val MAX_COLLAGE_CROP_EDGE_PX = 512
 
-    fun cropGenerous(frame: Bitmap, bbox: Rect, marginRatio: Float = DEFAULT_MARGIN_RATIO): Bitmap {
-        val rect = expandedRect(frame, bbox, marginRatio)
+    fun cropGenerous(
+        frame: Bitmap,
+        bbox: Rect,
+        marginRatio: Float = DEFAULT_MARGIN_RATIO,
+        otherFacesInFrame: List<Rect> = emptyList()
+    ): Bitmap {
+        val rect = expandedRect(frame, bbox, marginRatio, otherFacesInFrame)
         val crop = Bitmap.createBitmap(frame, rect.left, rect.top, rect.width(), rect.height())
 
         val longEdge = maxOf(crop.width, crop.height)

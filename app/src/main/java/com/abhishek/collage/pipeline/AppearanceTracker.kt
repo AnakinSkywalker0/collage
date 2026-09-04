@@ -18,11 +18,27 @@ import com.abhishek.collage.pipeline.math.VectorMath
  * A track closes (finalizes as an Appearance) once it hasn't been matched for
  * longer than [maxGapMs] -- this is what makes a blurred whip-pan or a person
  * leaving frame end the appearance rather than bridging it indefinitely.
+ *
+ * [iouThreshold] and [maxGapMs] were loosened from an initial 0.3f/600ms after
+ * running the real bundled embedder (not synthetic data) against real face
+ * crops: cosine similarity for the SAME person swings from ~0.85 down to
+ * ~0.51 under nothing more than the landmark jitter that's normal between two
+ * 200ms-apart video frames (small rotation/translation from head movement).
+ * That's barely above [embeddingThreshold], so the frame this dips just under
+ * 0.5 relies entirely on the IOU fallback to keep the track alive -- and that
+ * fallback needs the person's box to still overlap enough (IOU) and the gap
+ * timer to not have already expired. 0.3f IOU / 600ms was tight enough to
+ * lose that race during ordinary movement, silently splitting one real
+ * appearance into several (observed on-device: one person counted as 9
+ * appearances instead of 4). Different-person similarity, by contrast, is
+ * strongly negative on real faces (~-0.06), so there's no risk in being more
+ * generous here -- the failure mode this loosens is fragmentation, not
+ * identity mixing.
  */
 class AppearanceTracker(
-    private val iouThreshold: Float = 0.3f,
+    private val iouThreshold: Float = 0.2f,
     private val embeddingThreshold: Float = 0.5f,
-    private val maxGapMs: Long = 600L,
+    private val maxGapMs: Long = 1000L,
     /**
      * A track can only be extended via IOU alone (no strong embedding match)
      * if its embedding similarity to the candidate face is at least this much
