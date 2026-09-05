@@ -8,7 +8,6 @@ import com.abhishek.collage.collage.CollageComposer
 import com.abhishek.collage.model.FaceObservation
 import com.abhishek.collage.model.Person
 import com.abhishek.collage.model.ProcessingState.Stage
-import com.abhishek.collage.model.Tracklet
 import com.abhishek.collage.pipeline.math.VectorMath
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -82,7 +81,6 @@ class PipelineOrchestrator(context: Context) {
 
         val frames = frameExtractor.extract(videoUri) { onProgress(Stage.EXTRACTING, it) }
         check(frames.isNotEmpty()) { "Could not read any frames from the selected video." }
-        Log.d(TAG, "frames extracted: ${frames.size}")
 
         // Phase A: detection (cheap per-frame quality metrics computed here too).
         val perFrameDetected = frames.mapIndexed { index, frame ->
@@ -118,11 +116,6 @@ class PipelineOrchestrator(context: Context) {
         for (frame in frames) frame.bitmap.recycle()
 
         val rawFaceCount = perFrameDetected.sumOf { it.size }
-        val framesWithAFace = perFrameDetected.count { it.isNotEmpty() }
-        Log.d(
-            TAG,
-            "detection: $rawFaceCount raw face detections across $framesWithAFace/${frames.size} frames"
-        )
         if (rawFaceCount == 0) {
             Log.w(TAG, "ML Kit found zero faces in any sampled frame -- check video orientation/lighting, not thresholds")
         }
@@ -133,7 +126,7 @@ class PipelineOrchestrator(context: Context) {
         val totalFaces = perFrameDetected.sumOf { it.size }
         var embeddedCount = 0
         var embeddingFailures = 0
-        val perFrameFaces: List<TrackletBuilder.FrameFaces> = frames.mapIndexed { index, frame ->
+        val perFrameRaw: List<TrackletBuilder.FrameFaces> = frames.mapIndexed { index, frame ->
             val observations = perFrameDetected[index].mapNotNull { d ->
                 val embedding = faceEmbedder.embed(d.alignedCrop)
                 // The aligned crop exists only to be embedded; free it immediately
@@ -165,21 +158,37 @@ class PipelineOrchestrator(context: Context) {
             Log.w(TAG, "embedding: $embeddingFailures/$totalFaces faces produced no embedding")
         }
 
+        // Phase B2: center every embedding against this video's own mean, ONCE,
+        // before anything compares two of them.
+        //
+        // Raw cosine similarity between two different people in the same clip
+        // measures around 0.6-0.7, because every crop shares the same camera,
+        // lighting and background (see VectorMath.centered). Any similarity gate
+        // downstream therefore has to be set above 0.7 to mean anything -- and a
+        // gate set below that silently passes everything, which is exactly how an
+        // earlier tracking threshold of 0.55 let tracklets bridge straight across
+        // cuts and swallow whole appearances. Centering here puts tracking and
+        // clustering on the same, meaningful scale instead of leaving each stage
+        // to pick a threshold against an inflated one.
+        val flatObservations = perFrameRaw.flatMap { it.faces }
+        val centeredEmbeddings = VectorMath.centered(flatObservations.map { it.embedding })
+        var centeredIndex = 0
+        val perFrameFaces = perFrameRaw.map { frame ->
+            TrackletBuilder.FrameFaces(
+                timestampMs = frame.timestampMs,
+                faces = frame.faces.map { it.copy(embedding = centeredEmbeddings[centeredIndex++]) }
+            )
+        }
+
         // Phase C: frame-to-frame continuity -> tracklets. These are an
         // intermediate for building low-noise identity embeddings, NOT the
         // appearance count -- see TrackletBuilder.
         val tracklets = trackletBuilder.build(perFrameFaces)
         onProgress(Stage.TRACKING, 1f)
-        Log.d(TAG, "tracklets found: ${tracklets.size}")
-        for ((i, t) in tracklets.withIndex()) {
-            Log.d(TAG, "  tracklet[$i]: ${t.startMs}-${t.endMs}ms, ${t.observations.size} observations")
-        }
-        logPairwiseSimilarity(tracklets, identityClusterer.similarityThreshold)
 
         // Phase D: identity clustering across tracklets.
         val clusters = identityClusterer.cluster(tracklets)
         onProgress(Stage.CLUSTERING, 1f)
-        Log.d(TAG, "people (clusters) found: ${clusters.size}, tracklets_per_person=${clusters.map { it.tracklets.size }}")
 
         // Phase E: per person, re-derive appearances from their own timeline,
         // then pick their representative shot. A cluster whose every candidate
@@ -206,11 +215,6 @@ class PipelineOrchestrator(context: Context) {
         val people = peopleUnsorted
             .sortedBy { it.third }
             .mapIndexed { index, (appearances, best, _) ->
-                Log.d(
-                    TAG,
-                    "person[${index + 1}]: ${appearances.size} appearance(s) at " +
-                        appearances.joinToString { "${it.startMs}-${it.endMs}ms" }
-                )
                 Person(
                     displayIndex = index + 1,
                     appearanceCount = appearances.size,
@@ -219,6 +223,12 @@ class PipelineOrchestrator(context: Context) {
                 )
             }
         onProgress(Stage.SCORING, 1f)
+
+        Log.i(
+            TAG,
+            "${frames.size} frames -> $rawFaceCount detections -> ${tracklets.size} tracklets " +
+                "-> ${people.size} people, ${people.sumOf { it.appearanceCount }} appearances"
+        )
 
         // Every detection kept a generous crop as a collage candidate; only the
         // chosen ones are still needed. Releasing the rest before compositing
@@ -247,54 +257,11 @@ class PipelineOrchestrator(context: Context) {
         // content and we must only spare the exact instances still in use.
         val kept = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Bitmap, Boolean>())
         kept.addAll(keep)
-        var recycled = 0
         for (frame in frames) {
             for (observation in frame.faces) {
                 val crop = observation.generousCrop
-                if (crop !in kept && !crop.isRecycled) {
-                    crop.recycle()
-                    recycled++
-                }
+                if (crop !in kept && !crop.isRecycled) crop.recycle()
             }
         }
-        Log.d(TAG, "released $recycled unused candidate crop(s), kept ${keep.size}")
-    }
-
-    /**
-     * Logs the full sorted spread of cosine similarity between every pair of
-     * tracklet identity embeddings.
-     *
-     * This is the calibration instrument for [IdentityClusterer]'s threshold,
-     * and it is meant to be read rather than skimmed. With alignment working,
-     * the sorted list should show a visible step: a band of impostor pairs
-     * (different people) and a band of genuine pairs (same person), with a gap
-     * between them -- put the threshold in the gap. If instead the values form
-     * one smooth continuum with no step, no threshold can separate identities
-     * and the problem is upstream (crop alignment, face size, lighting), not a
-     * number to tune here.
-     */
-    private fun logPairwiseSimilarity(tracklets: List<Tracklet>, threshold: Float) {
-        if (tracklets.size < 2) {
-            Log.d(TAG, "only ${tracklets.size} tracklet(s) -- nothing to compare")
-            return
-        }
-        val embeddings = identityClusterer.clusteringEmbeddings(tracklets)
-        val pairs = mutableListOf<Pair<String, Float>>()
-        for (i in tracklets.indices) {
-            for (j in i + 1 until tracklets.size) {
-                pairs.add("$i-$j" to VectorMath.cosineSim(embeddings[i], embeddings[j]))
-            }
-        }
-        val sims = pairs.map { it.second }
-        Log.d(
-            TAG,
-            "tracklet-pair similarity (centered): n=${sims.size} min=%.3f avg=%.3f max=%.3f above($threshold)=%d"
-                .format(sims.min(), sims.average(), sims.max(), sims.count { it > threshold })
-        )
-        Log.d(
-            TAG,
-            "  sorted: " + pairs.sortedByDescending { it.second }
-                .joinToString(" ") { "%s=%.3f".format(it.first, it.second) }
-        )
     }
 }

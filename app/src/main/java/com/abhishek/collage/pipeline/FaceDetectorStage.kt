@@ -3,7 +3,6 @@ package com.abhishek.collage.pipeline
 import android.graphics.Bitmap
 import android.graphics.PointF
 import android.graphics.Rect
-import android.util.Log
 import com.google.android.gms.tasks.Task
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.Face
@@ -16,8 +15,6 @@ import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
-
-private const val TAG = "CollagePipeline"
 
 /**
  * Thin wrapper around ML Kit's face detector. One detector instance is reused
@@ -88,9 +85,6 @@ class FaceDetectorStage {
             if (!isDuplicate) {
                 kept.add(face)
             }
-        }
-        if (kept.size != faces.size) {
-            Log.d(TAG, "dedup: dropped ${faces.size - kept.size} duplicate box(es) from a ${faces.size}-detection frame")
         }
         return kept
     }

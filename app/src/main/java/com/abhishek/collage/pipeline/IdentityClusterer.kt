@@ -19,11 +19,15 @@ class IdentityClusterer(
      * on raw ones, and the two scales are completely different. Raw similarities
      * on a single video sit around 0.6 on average because every embedding shares
      * a large common component; centered ones average about 0.0, so this
-     * threshold is much lower than a raw-cosine threshold would be. Measured on a
-     * real clip, 0.30 was the middle of the band that recovered the right number
-     * of people; below 0.28 people merge, above 0.35 they fragment.
+     * threshold is much lower than a raw-cosine threshold would be.
+     *
+     * 0.35 is the centre of a measured stable plateau, not a guess. Sweeping this
+     * value against a real 30s clip's 231 tracklet pairs, the output is identical
+     * for every threshold from 0.30 to 0.38; at 0.40 clusters start shedding
+     * single appearances, and by 0.45 the result has fragmented badly. Sitting in
+     * the middle of that plateau gives the most margin on both sides.
      */
-    val similarityThreshold: Float = 0.30f,
+    val similarityThreshold: Float = 0.35f,
     /**
      * How many of a tracklet's best observations are averaged into its identity
      * embedding. See [representativeEmbedding].
@@ -47,14 +51,6 @@ class IdentityClusterer(
         ).map { indices -> PersonCluster(indices.map { tracklets[it] }) }
     }
 
-    /**
-     * The centered embeddings actually used for clustering, index-aligned with
-     * [tracklets]. Exposed so diagnostic logging reports the same numbers the
-     * clustering decision was made on rather than raw similarities, which are
-     * on a different scale and would make the threshold look wrong.
-     */
-    fun clusteringEmbeddings(tracklets: List<Tracklet>): List<FloatArray> =
-        VectorMath.centered(tracklets.map { representativeEmbedding(it) })
 
     /**
      * The point in identity space that represents this tracklet: the mean of its
@@ -71,7 +67,7 @@ class IdentityClusterer(
      * sharpness, the same properties that make an embedding trustworthy) while
      * averaging over enough frames for noise to cancel.
      */
-    fun representativeEmbedding(tracklet: Tracklet): FloatArray {
+    private fun representativeEmbedding(tracklet: Tracklet): FloatArray {
         val best = QualityScorer.rank(tracklet.observations)
             .take(topKObservations)
             .map { it.observation.embedding }

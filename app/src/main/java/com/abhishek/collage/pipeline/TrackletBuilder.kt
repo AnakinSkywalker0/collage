@@ -28,32 +28,45 @@ private const val TAG = "CollagePipeline"
  *    corrupts that tracklet's embedding, and its observations get attributed to
  *    whichever identity wins -- wrong person, wrong count.
  *
- * So every match must satisfy spatial AND identity continuity. The previous
- * implementation used OR (`sim > threshold || (iou > threshold && sim > 0f)`),
- * which is exactly wrong for this material: the supplied clips are cut-based
- * portrait video where consecutive shots frame different people's heads in the
- * same part of the frame. At a hard cut the outgoing and incoming face overlap
- * heavily -- IOU is HIGH precisely when identity has changed -- so an IOU-driven
- * match with a 0f identity floor bridged straight across cuts and chained 20
- * real segments into a handful of tracks.
+ * So every match must satisfy spatial AND identity continuity. The supplied
+ * clips are cut-based portrait video where consecutive shots frame different
+ * people's heads in the same part of the frame, so at a hard cut the outgoing
+ * and incoming face overlap heavily -- IOU is HIGH precisely when identity has
+ * changed. IOU alone therefore cannot be trusted to end a tracklet; the identity
+ * gate is what actually stops a cut being bridged.
+ *
+ * That gate only works if its threshold is above the similarity two DIFFERENT
+ * people actually score, which is why the embeddings reaching this class are
+ * centered first. Two earlier versions failed on exactly this point: one used
+ * OR with a 0f identity floor, and one used AND with a raw-cosine threshold of
+ * 0.55 when different people in the same clip measure 0.68 raw. Both let
+ * tracklets run through cuts and swallow whole appearances, which shows up
+ * downstream as a person's four appearances being reported as two.
  */
 class TrackletBuilder(
     /** Minimum box overlap between consecutive frames for spatial continuity. */
     private val iouThreshold: Float = 0.2f,
     /**
-     * Minimum cosine similarity to the PREVIOUS frame's face. Frame-to-frame
-     * similarity for one person is high (same pose, same lighting, 200ms apart),
-     * so this can be stricter than the cross-appearance clustering threshold.
+     * Minimum cosine similarity to the PREVIOUS frame's face.
+     *
+     * IMPORTANT: this is measured on CENTERED embeddings (PipelineOrchestrator
+     * centers them before calling this class), and the scale is nothing like raw
+     * cosine. Centered, two different people score around 0.0-0.1 while one
+     * person 200ms apart scores above 0.9, so 0.45 sits in open space between
+     * them. On RAW embeddings the same two populations are about 0.68 and 0.95,
+     * which is why an earlier raw threshold of 0.55 was below the impostor level
+     * and bridged cuts instead of blocking them. Do not port this number back to
+     * raw similarities.
      */
-    private val stepSimilarityThreshold: Float = 0.55f,
+    private val stepSimilarityThreshold: Float = 0.45f,
     /**
-     * Minimum cosine similarity to the tracklet's FIRST face. Step-wise matching
-     * alone can drift: each hop is individually plausible while the endpoints
-     * are not the same person. Anchoring to the first observation as well bounds
-     * total drift over the tracklet's life. Looser than the step threshold
-     * because pose legitimately changes across a segment.
+     * Minimum cosine similarity to the tracklet's FIRST face, also centered.
+     * Step-wise matching alone can drift: each hop is individually plausible
+     * while the endpoints are not the same person. Anchoring to the first
+     * observation bounds total drift over the tracklet's life. Looser than the
+     * step threshold because pose legitimately changes across a segment.
      */
-    private val anchorSimilarityThreshold: Float = 0.35f,
+    private val anchorSimilarityThreshold: Float = 0.25f,
     /**
      * How long a tracklet may go unmatched before it closes. Kept to two sample
      * intervals: a tracklet only needs to survive brief detector dropouts, since
@@ -172,15 +185,9 @@ class TrackletBuilder(
 
         for (tracklet in open) closed.add(tracklet.finish())
 
-        val ordered = closed
+        return closed
             .filter { it.observations.size >= minObservations }
             .sortedBy { it.startMs }
-        Log.d(
-            TAG,
-            "TrackletBuilder: ${frames.size} frames -> ${ordered.size} tracklets " +
-                "(${closed.size - ordered.size} dropped as duplicate-detection noise)"
-        )
-        return ordered
     }
 
     private fun OpenTracklet.finish() = Tracklet(id = id, observations = observations.toList())

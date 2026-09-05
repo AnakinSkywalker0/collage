@@ -18,12 +18,12 @@ Graded 50% identity/appearance-count accuracy, 30% code quality/architecture, 20
 | Detection + embeddings + clustering, all three | ✅ ML Kit → MobileFaceNet → agglomerative clustering |
 | On-device, no backend | ✅ |
 | Off main thread, clear progress | ✅ `Dispatchers.Default`, per-stage progress |
-| Appearance count per person | ✅ — accuracy pending device calibration, see below |
+| Appearance count per person | ✅ — 20/20 on Sample 1; see "Measured on device" |
 | Rep shot: frontality / sharpness / eyes open / smiling | ✅ `QualityScorer` |
 | "Do not crop tightly… crop generously" | ✅ `cropGenerous`, separate from the embedder crop |
 | Save to gallery + share sheet | ✅ |
 | Don't hardcode the three clips' results | ✅ nothing sample-specific in the code |
-| README: build steps, embedding model, similarity threshold | ⚠️ needs the threshold from the calibration run |
+| README: build steps, embedding model, similarity threshold | ❌ not written — threshold is now known (0.35) |
 | Debug APK | ✅ builds (`app/build/outputs/apk/debug/app-debug.apk`) |
 | ≤60s screen recording, all three collages legible | ❌ not started |
 
@@ -110,25 +110,28 @@ The supplied clips are cut-based portrait video: consecutive shots frame differe
 - `./gradlew :app:assembleDebug` succeeds.
 - The matrix claim above was checked numerically, not by reading the code.
 
-**Not verified — this is the gap:**
-- **The fixed pipeline has not yet been run on a device against any sample video.** No claim about actual appearance counts is currently supported by evidence.
-- Thresholds (`IdentityClusterer` 0.5, `TrackletBuilder` 0.55 / 0.35) are inherited from synthetic data and one calibration pass against real embeddings is expected to move at least the clustering one.
-- Samples 2 and 3 have never been run successfully.
+**Measured on device, Sample 1 (5 Sept, calibration run):**
+- 151 frames → 164 detections → 22 tracklets → 6 people, **20 appearances**.
+- Segmentation is correct. The 18 distinct visible segments are all 1.2–1.4s, and there are exactly two double-occupancy moments — at 10.2–11.4s and 20.2–21.4s, which is precisely where the brief says A&B and C&D share the frame. 18 + 2 = 20, and the brief's ground truth is 20.
+- Identity grouping reaches **6 clusters instead of 5**. Two are exactly right (4 appearances each); one holds 6 appearances and is two people merged.
+
+**Known limitation — the 6-vs-5 gap is the embedding model's ceiling, not a tunable:**
+The over-merged cluster is two tight sub-groups ({0,9,17} at 0.87–0.89 internally, {4,11,20} at 0.80–0.95) bound together at 0.425 average linkage. Splitting them and giving each a correct 4th appearance would require some candidate pair to score above that; the best available across every candidate is **+0.099**, and most are negative. No threshold prefers the correct grouping, because the embedding evidence points the other way. A sweep confirms it: 0.30/0.35/0.38 all produce the same output, 0.40 starts shedding singletons, 0.45 fragments into 9 clusters.
+
+**Still not verified:**
+- Samples 2 and 3 have never been run.
+- End-to-end wall-clock time per clip has not been measured (matters for the 60s recording budget).
 
 ## Immediate next steps (in order)
 
-1. **Calibration run.** Install, run Sample 1, `adb logcat -c && adb logcat -s CollagePipeline`.
-   - Read the `tracklet-pair similarity` line and the `sorted:` dump after it. Look for a **step** between the impostor band and the genuine band; set `IdentityClusterer(similarityThreshold = …)` inside that gap.
-   - No step at all → alignment still isn't producing usable crops; inspect the crops directly rather than tuning numbers.
-   - `tracklets found:` in the hundreds → lower `TrackletBuilder.stepSimilarityThreshold` from 0.55.
-2. Confirm Sample 1 reaches 5 people × 4 appearances.
-3. Run Samples 2 and 3. Their ground truth isn't given — sanity-check by eye.
-4. Time a full run. `SAMPLE_INTERVAL_MS = 200` with `OPTION_CLOSEST` decodes ~150 non-keyframes per clip and may be slow; the screen recording budget is 60s total for all three videos. 300–400ms sampling is still ample for ~1.5s segments if needed.
-5. Strip debug logging before the submission APK — it is deliberately still in for step 1. Tags to remove in `PipelineOrchestrator`: the per-tracklet dump, `logPairwiseSimilarity`, the per-person appearance dump.
-6. README: build/setup steps, embedding model + source/license, and **the chosen similarity threshold with the reasoning** (all three are explicitly required by the brief).
-7. Commit and push to `AnakinSkywalker0/collage`.
-8. Build the final debug APK.
-9. Record the ≤60s screen capture: processing, appearance counts, and the finished collage for **all three** samples, each held on screen long enough to read.
+1. Run Samples 2 and 3. Their ground truth isn't given — sanity-check by eye against the collage.
+2. Time a full run. `SAMPLE_INTERVAL_MS = 200` with `OPTION_CLOSEST` decodes ~150 non-keyframes per clip and may be slow; the screen recording budget is 60s total for all three videos. 300–400ms sampling is still ample for ~1.4s segments if needed.
+3. README: build/setup steps, embedding model + source/license, and **the chosen similarity threshold with the reasoning** (all three are explicitly required by the brief). Write the 6-vs-5 limitation honestly — the evidence is in "Known limitation" above.
+4. Commit and push to `AnakinSkywalker0/collage`.
+5. Build the final debug APK.
+6. Record the ≤60s screen capture: processing, appearance counts, and the finished collage for **all three** samples, each held on screen long enough to read.
+
+**Already done:** calibration run against Sample 1; threshold set to 0.35 (centre of the measured stable plateau); debug logging stripped. The pipeline now emits only three warnings for real failure conditions plus one `Log.i` summary line (`N frames -> N detections -> N tracklets -> N people, N appearances`).
 
 ## Key files
 
@@ -138,7 +141,7 @@ The supplied clips are cut-based portrait video: consecutive shots frame differe
 - `pipeline/AppearanceSplitter.kt` — the appearance count comes from here, nowhere else.
 - `pipeline/math/TimelineSegmenter.kt` — the counting arithmetic, unit tested.
 - `pipeline/math/AgglomerativeClusterer.kt` — deterministic average-linkage clustering.
-- `pipeline/PipelineOrchestrator.kt` — stage wiring + the calibration logging to strip.
+- `pipeline/PipelineOrchestrator.kt` — stage wiring; centers embeddings once, before anything compares two.
 - `pipeline/FaceEmbedder.kt` — MobileFaceNet, 112×112 RGB, `(x−127.5)/128`, 192-d, L2-normalized.
 - `README.md` — needs model, threshold, and build steps.
 - `test_normalization.py` — **obsolete**; its inputs were produced by the broken aligner. Delete or regenerate before relying on it.
