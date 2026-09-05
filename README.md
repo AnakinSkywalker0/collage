@@ -15,21 +15,14 @@ the best shot per person → render a shareable collage.
 
 ## Build / setup
 
-1. **Get the embedding model** (required — the app will throw a clear error at
-   the start of processing if it's missing). Download a 112×112-input,
-   MobileFaceNet-class `.tflite` file and place it at:
-   ```
-   app/src/main/assets/face_embedder.tflite
-   ```
-   Known-good public sources (pick one):
-   - https://github.com/MCarlomagno/FaceRecognitionAuth/blob/master/assets/mobilefacenet.tflite
-   - https://github.com/shubham0204/FaceRecognition_With_FaceNet_Android (assets folder)
-   - https://github.com/shubham0204/OnDevice-Face-Recognition-Android
-
-   Any model matching that input/output shape works as long as you update
-   `FaceEmbedder.INPUT_SIZE` / `EMBEDDING_DIM` to match if it differs (default
-   assumes 112×112 input, 192-d output — adjust to the specific file's actual
-   output dimension, check with Netron if unsure).
+1. **Embedding model — already bundled.** `app/src/main/assets/face_embedder.tflite`
+   (5,233,552 bytes) ships with the repo, so a fresh clone builds and runs
+   with no extra downloads. It is byte-identical to `mobilefacenet.tflite`
+   from https://github.com/MCarlomagno/FaceRecognitionAuth (MobileFaceNet,
+   112×112 RGB input, 192-d float output; see "Embedding model used" below).
+   To swap in a different model, replace that file and update
+   `FaceEmbedder.INPUT_SIZE` / `EMBEDDING_DIM` to match (check with Netron
+   if unsure).
 
 2. Open the project in Android Studio (or just `./gradlew` from terminal), let Gradle sync.
 3. Run on an emulator (API 26+) or physical device — no special permissions needed to pick or process a video (SAF handles that); `WRITE_EXTERNAL_STORAGE` is requested only on API 26-28 right before saving to gallery.
@@ -134,7 +127,34 @@ borderline pair over threshold. Fixed by clustering on each appearance's
 reusing `QualityScorer`'s existing frontality/sharpness ranking) — the same
 properties that make a good collage shot also make a trustworthy embedding.
 
-### Bugs found and fixed while calibrating
+### Bugs found and fixed on-device (post-wiring)
+
+3. **FaceAligner built its similarity transform backwards.** The eye-alignment
+   matrix used `postTranslate/postRotate/postScale/postTranslate`, but `post*`
+   calls apply to the point in reverse order — so the destination shift was
+   scaled and rotated instead of applied last, misplacing every face off the
+   model's canonical eye positions. Same-frame similarity still looked high
+   (the misplacement is frame-to-frame consistent), which hid it; the tell
+   was different-person pairs scoring 0.5–0.67, deep in same-person range.
+   Fixed by switching to `pre*` calls in the same order, yielding
+   `T(dest) · S · R · T(-eye)` as intended (`FaceAligner.kt` documents why).
+4. **Track identity reference drifted via running mean.** Match decisions
+   compared candidates against a running mean over everything the track had
+   absorbed, so each wrong merge made the next one easier (measured: a track
+   absorbing 143 observations across a full 30s clip, similarity-to-origin
+   sliding 0.98 → 0.11 while similarity-to-mean stayed above threshold).
+   Fixed by matching against the track's fixed first observation only; the
+   running mean is gone, not just ignored.
+5. **Preprocessing ruled OUT as a suspect.** The exact on-device
+   alignment + model pipeline was re-run in Python (`test_normalization.py`,
+   `.venv` with `ai-edge-litert`) over 184 real aligned crops from a single
+   Sample 1 run, under three normalizations (`(px-127.5)/128`,
+   `(px-127.5)/127.5`, `px/255`): all three gave near-identical consecutive-
+   frame similarities (mean 0.77–0.80, 22–29/183 pairs below 0.5). No scheme
+   separates better, so the remaining spread is content (appearance
+   boundaries, two-person frames), not input scaling.
+
+### Bugs found and fixed while calibrating (pre-wiring simulation)
 
 This algorithm can't be exercised end-to-end without the Android SDK / an
 emulator, so before wiring it up for real, the exact tracking + clustering
@@ -190,13 +210,17 @@ collage/       CollageComposer (Canvas-based grid renderer), CollageSaver
 model/         FrameSample, FaceObservation, Appearance, Person, ProcessingState
 ```
 
-Faces are always cropped generously (50% margin around the ML Kit bounding
-box, clamped to frame bounds) for both the embedding input and the stored
-tile source — never a tight bbox crop, per the assignment brief.
+Faces are cropped twice, deliberately differently: **generously** (50% margin,
+clamped to frame bounds, backing off from neighbouring faces) for the stored
+collage tile — never a tight bbox crop, per the assignment brief — and
+**tight + eye-aligned** (112×112 via `FaceAligner`) for the embedding model,
+which was trained on that exact framing.
 
 ## Known limitations / things to verify before submitting
 
-- Thresholds above need empirical tuning against all three sample videos with the real embedding model, not just the synthetic simulation described above.
+- Appearance/person counts still need a final on-device check against the
+  Sample 1 worked example (5 people × 4 appearances) after the FaceAligner
+  and anchor fixes above — re-run all three samples, not just Sample 1.
 - Two people with heavily overlapping bounding boxes and unusually similar embeddings can still, rarely, get their identities swapped between tracks — a known, documented residual risk (see "Bugs found and fixed"), not something worth chasing to zero since tightening it further caused far more common track fragmentation in testing.
 - Emulator inference is slower than a real device; if timing matters for your recording, do a final pass on physical hardware.
 - The collage layout (2 cols ≤4 people, 3 cols beyond) hasn't been visually tuned for very large person counts — check it looks right on your actual results.

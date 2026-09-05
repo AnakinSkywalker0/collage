@@ -7,6 +7,8 @@ import android.net.Uri
 import android.os.Build
 import com.abhishek.collage.model.FrameSample
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /**
@@ -40,6 +42,12 @@ class FrameExtractor(private val context: Context) {
 
             val timestamps = (0..durationMs step SAMPLE_INTERVAL_MS).toList()
             for ((index, tsMs) in timestamps.withIndex()) {
+                // Nothing in this loop suspends -- MediaMetadataRetriever is a
+                // blocking API -- so without an explicit check a cancelled run
+                // would keep decoding all ~150 frames before noticing. That
+                // matters because the ViewModel cancels the previous run when a
+                // new video is picked, and the two runs share one detector.
+                currentCoroutineContext().ensureActive()
                 val raw = getFrameAt(retriever, tsMs) ?: continue
                 val scaled = downscale(raw)
                 if (scaled !== raw) raw.recycle()

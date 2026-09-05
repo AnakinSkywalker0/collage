@@ -18,9 +18,29 @@ object QualityScorer {
     private const val W_EYES_OPEN = 0.20f
     private const val W_SMILING = 0.20f
 
-    fun pickBest(observations: List<FaceObservation>): ScoredObservation? {
-        if (observations.isEmpty()) return null
+    fun pickBest(observations: List<FaceObservation>): ScoredObservation? =
+        rank(observations).firstOrNull()
 
+    /**
+     * Every observation scored and sorted best-first.
+     *
+     * Shared by two callers on purpose: this picks the collage shot, and
+     * IdentityClusterer averages the top few to build a tracklet's identity
+     * embedding. The properties that make a shot presentable (frontal, sharp,
+     * eyes open) are the same ones that make its embedding trustworthy, so both
+     * decisions should be reading one ranking rather than two that can drift
+     * apart.
+     *
+     * Sharpness is normalized against the best value in the pool because
+     * Laplacian variance has no absolute scale -- it depends on resolution and
+     * lighting, so it is only meaningful relative to the other candidates for
+     * the same person.
+     */
+    fun rank(observations: List<FaceObservation>): List<ScoredObservation> {
+        if (observations.isEmpty()) return emptyList()
+
+        // Prefer faces fully inside the frame, but never return nothing: if
+        // every observation is clipped, rank the clipped ones instead.
         val nonClipped = observations.filter { !it.touchesFrameEdge }
         val pool = if (nonClipped.isNotEmpty()) nonClipped else observations
 
@@ -28,7 +48,7 @@ object QualityScorer {
 
         return pool
             .map { ScoredObservation(it, score(it, maxSharpness)) }
-            .maxByOrNull { it.score }
+            .sortedByDescending { it.score }
     }
 
     private fun score(obs: FaceObservation, maxSharpness: Float): Float {

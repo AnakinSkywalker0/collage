@@ -3,6 +3,7 @@ package com.abhishek.collage.pipeline
 import android.graphics.Bitmap
 import android.graphics.PointF
 import android.graphics.Rect
+import android.util.Log
 import com.google.android.gms.tasks.Task
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.Face
@@ -16,6 +17,8 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
 
+private const val TAG = "CollagePipeline"
+
 /**
  * Thin wrapper around ML Kit's face detector. One detector instance is reused
  * sequentially (ML Kit detectors are not safe for concurrent use), so calls
@@ -28,7 +31,12 @@ class FaceDetectorStage {
         .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
         .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
         .setMinFaceSize(0.1f)
-        .enableTracking()
+        // Deliberately NOT enableTracking(): ML Kit's tracker is built for a
+        // continuous camera stream, we feed it frames seeked 200ms apart, and
+        // nothing downstream reads Face.trackingId -- TrackletBuilder does its
+        // own continuity from boxes plus embeddings. Enabling it only added
+        // per-frame cost, and ML Kit itself advises against pairing it with
+        // PERFORMANCE_MODE_ACCURATE.
         .build()
 
     private val detector = FaceDetection.getClient(options)
@@ -65,6 +73,9 @@ class FaceDetectorStage {
          * *itself* for the rest of the video -- producing a ghost person with
          * suspiciously perfect continuity. Two boxes this overlapping within
          * one frame are almost certainly the same face; keep only the larger.
+         * Verified against real two-person frames: genuinely different people
+         * never approach this IOU (their boxes may touch, not coincide), so
+         * the filter does not eat real second people.
          */
         private const val DUPLICATE_IOU_THRESHOLD = 0.6f
     }
@@ -74,7 +85,12 @@ class FaceDetectorStage {
         val kept = mutableListOf<RawFace>()
         for (face in faces.sortedByDescending { it.boundingBox.width().toLong() * it.boundingBox.height() }) {
             val isDuplicate = kept.any { existing -> boxIou(existing.boundingBox, face.boundingBox) > DUPLICATE_IOU_THRESHOLD }
-            if (!isDuplicate) kept.add(face)
+            if (!isDuplicate) {
+                kept.add(face)
+            }
+        }
+        if (kept.size != faces.size) {
+            Log.d(TAG, "dedup: dropped ${faces.size - kept.size} duplicate box(es) from a ${faces.size}-detection frame")
         }
         return kept
     }

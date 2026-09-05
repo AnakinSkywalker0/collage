@@ -39,15 +39,39 @@ object FaceCropUtils {
         var marginTop = bbox.height() * marginRatio
         var marginBottom = marginTop
 
+        // Two corrections over a naive "if the gap is small, halve the margin":
+        //
+        // 1. A NEGATIVE gap means the boxes already overlap on that axis, which
+        //    is the case that most needs clamping. An `in 0f..margin` test
+        //    silently skipped exactly those, left the full margin in place, and
+        //    let the tile expand straight through a neighbour's face -- and
+        //    overlapping boxes are common in the brief's own
+        //    two-people-share-the-frame segments. coerceAtLeast(0f) then stops a
+        //    negative gap from producing a negative margin, which would eat into
+        //    the subject's own face.
+        //
+        // 2. A side is only constrained by a neighbour that actually sits on
+        //    that side. Without the perpendicular-overlap guard, a face directly
+        //    ABOVE this one (which necessarily overlaps horizontally, so both
+        //    horizontal gaps read negative) would clamp the left and right
+        //    margins to zero and needlessly shrink an otherwise unobstructed
+        //    tile.
         for (other in otherFacesInFrame) {
-            val gapRight = (other.left - bbox.right).toFloat()
-            if (gapRight in 0f..marginRight) marginRight = (gapRight / 2f).coerceAtLeast(0f)
-            val gapLeft = (bbox.left - other.right).toFloat()
-            if (gapLeft in 0f..marginLeft) marginLeft = (gapLeft / 2f).coerceAtLeast(0f)
-            val gapBottom = (other.top - bbox.bottom).toFloat()
-            if (gapBottom in 0f..marginBottom) marginBottom = (gapBottom / 2f).coerceAtLeast(0f)
-            val gapTop = (bbox.top - other.bottom).toFloat()
-            if (gapTop in 0f..marginTop) marginTop = (gapTop / 2f).coerceAtLeast(0f)
+            val overlapsVertically = other.bottom > bbox.top && other.top < bbox.bottom
+            val overlapsHorizontally = other.right > bbox.left && other.left < bbox.right
+
+            if (overlapsVertically) {
+                val gapRight = (other.left - bbox.right).toFloat()
+                if (gapRight < marginRight) marginRight = (gapRight / 2f).coerceAtLeast(0f)
+                val gapLeft = (bbox.left - other.right).toFloat()
+                if (gapLeft < marginLeft) marginLeft = (gapLeft / 2f).coerceAtLeast(0f)
+            }
+            if (overlapsHorizontally) {
+                val gapBottom = (other.top - bbox.bottom).toFloat()
+                if (gapBottom < marginBottom) marginBottom = (gapBottom / 2f).coerceAtLeast(0f)
+                val gapTop = (bbox.top - other.bottom).toFloat()
+                if (gapTop < marginTop) marginTop = (gapTop / 2f).coerceAtLeast(0f)
+            }
         }
 
         val left = (bbox.left - marginLeft.toInt()).coerceIn(0, frame.width - 1)

@@ -1,0 +1,13 @@
+# Example LLM-generated mission instructions
+# One command per line. Comments and blank lines are ignored.
+# Coordinate system matches Unity: X = east, Z = north (grid cells or world units)
+
+# Phase 1: Scout the north sector
+GOTO 5 15
+GOTO 10 20
+
+# Phase 2: Return to base
+WAIT 2
+GOTO 0 0
+
+STOP

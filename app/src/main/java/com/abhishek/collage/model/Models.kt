@@ -2,7 +2,6 @@ package com.abhishek.collage.model
 
 import android.graphics.Bitmap
 import android.graphics.Rect
-import com.abhishek.collage.pipeline.math.VectorMath
 
 /**
  * One sampled frame from the source video.
@@ -34,18 +33,38 @@ data class FaceObservation(
 }
 
 /**
- * One continuous visible segment of a single person within the source video.
- * Finalized once a track is closed by AppearanceTracker; personIdProvisional
- * is a per-video track id, NOT the final cross-appearance identity.
+ * A run of detections that frame-to-frame continuity proves are the same face.
+ *
+ * A tracklet is an INTERMEDIATE, not an answer. Its only job is to pool several
+ * views of one face so we can compute a low-noise embedding for it; it is
+ * deliberately built conservatively (see TrackletBuilder), so it may
+ * over-segment a single visible segment into two or three pieces. That is fine
+ * and by design -- the final appearance count is re-derived from timestamps
+ * after identity clustering (see AppearanceSplitter), so fragmentation here
+ * costs nothing, while a tracklet that wrongly spans two people would corrupt
+ * both the identity and the count.
+ */
+data class Tracklet(
+    val id: Int,
+    val observations: List<FaceObservation>
+) {
+    val startMs: Long get() = observations.first().timestampMs
+    val endMs: Long get() = observations.last().timestampMs
+}
+
+/**
+ * One continuous visible segment of one identified person -- the unit the
+ * assignment actually counts ("starts when a person's face becomes clearly
+ * visible and ends when it is no longer clearly visible").
+ *
+ * Produced by AppearanceSplitter AFTER identity clustering, by splitting a
+ * person's whole observation timeline on temporal gaps.
  */
 data class Appearance(
-    val personIdProvisional: Int,
     val observations: List<FaceObservation>,
     val startMs: Long,
     val endMs: Long
-) {
-    val meanEmbedding: FloatArray by lazy { VectorMath.mean(observations.map { it.embedding }) }
-}
+)
 
 /**
  * Final, clustered identity: one real person, possibly spanning multiple

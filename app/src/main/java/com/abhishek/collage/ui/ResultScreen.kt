@@ -12,8 +12,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -52,31 +52,39 @@ fun ResultScreen(
     }
 
     Column(modifier = modifier.fillMaxSize()) {
-        Image(
-            bitmap = collage.asImageBitmap(),
-            contentDescription = "Generated collage",
-            contentScale = ContentScale.FillWidth,
+        // Collage + counts scroll together (a 5+ person collage is taller
+        // than most screens); Save/Share stay pinned at the bottom.
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-        )
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+        ) {
+            Image(
+                bitmap = collage.asImageBitmap(),
+                contentDescription = "Generated collage",
+                contentScale = ContentScale.FillWidth,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+            )
 
-        Text(
-            text = "Appearance counts",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(horizontal = 16.dp)
-        )
+            Text(
+                text = "Appearance counts",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
 
-        LazyColumn(modifier = Modifier.weight(1f).padding(horizontal = 16.dp)) {
-            items(people) { person ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 6.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("Person ${person.displayIndex}")
-                    Text("${person.appearanceCount} appearances")
+            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                people.forEach { person ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Person ${person.displayIndex}")
+                        Text("${person.appearanceCount} appearances")
+                    }
                 }
             }
         }

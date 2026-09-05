@@ -1,68 +1,84 @@
 package com.abhishek.collage.pipeline
 
-import com.abhishek.collage.model.Appearance
-import com.abhishek.collage.pipeline.math.GreedyClusterer
+import com.abhishek.collage.model.Tracklet
+import com.abhishek.collage.pipeline.math.AgglomerativeClusterer
+import com.abhishek.collage.pipeline.math.VectorMath
 
 /**
- * Merges per-video Appearances that belong to the same real person. A thin
- * Appearance-shaped adapter over the framework-free GreedyClusterer -- see
- * that class for the actual algorithm.
+ * Groups [Tracklet]s that belong to the same real person.
  *
- * similarityThreshold is cosine similarity on L2-normalized embeddings
- * (equivalent to a dot product). 0.5 is a starting point, not a final
- * answer -- the right value depends entirely on how separated your actual
- * embedding model's genuine (same-person) vs impostor (different-person)
- * similarity distributions are, which you can only know by running it. To
- * calibrate against a real video: log cosine similarity between every pair
- * of appearance mean-embeddings along with whether they're truly the same
- * person (from the worked example / your own eyeballing), then pick a
- * threshold between the top of the impostor range and the bottom of the
- * genuine range. Simulating this exact algorithm against synthetic data
- * shaped like the Sample 1 worked example (5 people x 4 appearances, two
- * overlapping segments) with a realistic genuine/impostor gap consistently
- * recovered 5 clusters of 4 across a 0.35-0.55 threshold band -- 0.67 (an
- * earlier guess) was too high and never merged anything. 0.5 is the safer
- * default; re-tune once real embeddings are in hand.
- *
- * Clusters on each appearance's BEST-quality observation embedding, not the
- * mean of every observation in the track. Verified against a real 5-person
- * clip: single clean, well-aligned frames for all 5 people separated with a
- * solid margin (max pairwise similarity 0.47, everyone else well below), yet
- * the on-device run merged them into 3 clusters. The gap is exactly what a
- * plain mean predicts -- an appearance's track legitimately contains blurry,
- * off-angle, and mid-turn frames alongside good ones, and averaging their
- * embeddings in drags the appearance's representative point away from the
- * person's true identity centre and toward whichever other person it's
- * closest to. QualityScorer already ranks observations by frontality and
- * sharpness (the exact properties that also make an embedding trustworthy)
- * to pick the collage shot; reusing that same pick as the clustering key
- * uses the cleanest evidence available instead of diluting it with noise.
+ * Embeddings are CENTERED before anything is compared — that step is what makes
+ * the threshold meaningful at all, and it is explained in [VectorMath.centered].
+ * PipelineOrchestrator logs the sorted pairwise spread of these centered values
+ * on every run so the threshold can be checked against real data: pick a value
+ * in the gap between the impostor ceiling and the genuine floor.
  */
 class IdentityClusterer(
-    val similarityThreshold: Float = 0.5f
+    /**
+     * Cosine threshold on CENTERED embeddings (see [VectorMath.centered]) — not
+     * on raw ones, and the two scales are completely different. Raw similarities
+     * on a single video sit around 0.6 on average because every embedding shares
+     * a large common component; centered ones average about 0.0, so this
+     * threshold is much lower than a raw-cosine threshold would be. Measured on a
+     * real clip, 0.30 was the middle of the band that recovered the right number
+     * of people; below 0.28 people merge, above 0.35 they fragment.
+     */
+    val similarityThreshold: Float = 0.30f,
+    /**
+     * How many of a tracklet's best observations are averaged into its identity
+     * embedding. See [representativeEmbedding].
+     */
+    private val topKObservations: Int = 5
 ) {
 
-    class PersonCluster(val appearances: List<Appearance>)
+    class PersonCluster(val tracklets: List<Tracklet>)
 
-    fun cluster(appearances: List<Appearance>): List<PersonCluster> {
-        val sorted = appearances.sortedBy { it.startMs }
-        val clusters = GreedyClusterer.cluster(
-            items = sorted,
-            embeddingOf = { representativeEmbedding(it) },
+    fun cluster(tracklets: List<Tracklet>): List<PersonCluster> {
+        if (tracklets.isEmpty()) return emptyList()
+        // Center across this video's tracklets before comparing anything --
+        // without it, different people routinely score 0.5-0.7 against each other
+        // and no threshold separates identities. Index-aligned with `tracklets`.
+        val centered = VectorMath.centered(tracklets.map { representativeEmbedding(it) })
+        val embeddingByIndex = tracklets.indices.associateWith { centered[it] }
+        return AgglomerativeClusterer.cluster(
+            items = tracklets.indices.toList(),
+            embeddingOf = { embeddingByIndex.getValue(it) },
             threshold = similarityThreshold
-        )
-        return clusters.map { PersonCluster(it.members) }
+        ).map { indices -> PersonCluster(indices.map { tracklets[it] }) }
     }
 
     /**
-     * The embedding actually used to place this appearance in identity space
-     * -- its best-quality observation, not the noisy mean of every
-     * observation in the track (see class doc). Exposed so diagnostic
-     * logging reflects the same numbers the clustering decision was
-     * actually made on.
+     * The centered embeddings actually used for clustering, index-aligned with
+     * [tracklets]. Exposed so diagnostic logging reports the same numbers the
+     * clustering decision was made on rather than raw similarities, which are
+     * on a different scale and would make the threshold look wrong.
      */
-    fun representativeEmbedding(appearance: Appearance): FloatArray {
-        return QualityScorer.pickBest(appearance.observations)?.observation?.embedding
-            ?: appearance.meanEmbedding
+    fun clusteringEmbeddings(tracklets: List<Tracklet>): List<FloatArray> =
+        VectorMath.centered(tracklets.map { representativeEmbedding(it) })
+
+    /**
+     * The point in identity space that represents this tracklet: the mean of its
+     * [topKObservations] highest-quality observations, re-normalized.
+     *
+     * Both extremes are worse. Averaging EVERY observation dilutes the identity
+     * with the blurry, mid-turn, half-occluded frames that any real track
+     * contains, dragging the tracklet toward whoever it happens to be nearest.
+     * Using the single best observation removes that dilution but makes the
+     * whole identity decision rest on one frame, so ordinary per-frame noise
+     * moves it -- which is what made repeat runs of the same video disagree.
+     *
+     * Top-k keeps the selectivity (QualityScorer already ranks by frontality and
+     * sharpness, the same properties that make an embedding trustworthy) while
+     * averaging over enough frames for noise to cancel.
+     */
+    fun representativeEmbedding(tracklet: Tracklet): FloatArray {
+        val best = QualityScorer.rank(tracklet.observations)
+            .take(topKObservations)
+            .map { it.observation.embedding }
+        return if (best.isEmpty()) {
+            VectorMath.mean(tracklet.observations.map { it.embedding })
+        } else {
+            VectorMath.mean(best)
+        }
     }
 }

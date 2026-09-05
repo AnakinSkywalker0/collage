@@ -34,7 +34,13 @@ object CollageComposer {
             return placeholder()
         }
 
-        val columns = if (people.size <= 4) 2 else 3
+        // One person in a 2-column grid leaves half the canvas empty; give a
+        // solo result the full width instead.
+        val columns = when {
+            people.size == 1 -> 1
+            people.size <= 4 -> 2
+            else -> 3
+        }
         val rows = ceil(people.size / columns.toFloat()).toInt()
         val tileWidth = (CANVAS_WIDTH - PADDING * 2 - GUTTER * (columns - 1)) / columns
         val tileHeight = tileWidth * TILE_ASPECT

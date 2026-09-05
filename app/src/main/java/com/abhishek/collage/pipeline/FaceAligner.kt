@@ -67,10 +67,25 @@ object FaceAligner {
         val scale = dstEyeDistance / srcEyeDistance
         val angleDegrees = Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat()
 
+        // These MUST be post* calls in this order, and the distinction is not
+        // cosmetic. Android's Matrix applies post* as M = X * M, so calling
+        // them in this order composes T(dest) * S * R * T(-eye), which maps a
+        // point as: shift the image-left eye to the origin, undo the head
+        // roll, scale to canonical eye spacing, then place the eye at its
+        // canonical destination -- eyes land exactly on
+        // (LEFT_EYE_X, LEFT_EYE_Y) / (RIGHT_EYE_X, RIGHT_EYE_Y).
+        //
+        // pre* composes the same four calls in the opposite direction
+        // (M = M * X), which applies the destination shift FIRST and the
+        // -eye shift LAST. Worked numerically for a face with eyes at
+        // (500,400)/(560,430): the pre* form puts the left eye at
+        // (-140.96, -314.23) -- entirely off a 112x112 canvas -- and the
+        // resulting crop samples source pixels around y=1055..1338, i.e. the
+        // bottom edge of the frame rather than the face. The embedder then
+        // sees background instead of a person, every embedding collapses
+        // toward "this video's background", and identity clustering becomes
+        // noise. Do not "simplify" these back to pre*.
         val matrix = Matrix().apply {
-            // Work in source space: move the image-left eye to the origin, undo
-            // the head roll, scale to canonical eye spacing, then place the eye
-            // at its canonical destination.
             postTranslate(-imageLeftEye.x, -imageLeftEye.y)
             postRotate(-angleDegrees)
             postScale(scale, scale)

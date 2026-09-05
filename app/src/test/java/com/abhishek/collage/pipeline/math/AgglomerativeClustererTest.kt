@@ -8,7 +8,7 @@ import kotlin.math.ln
 import kotlin.math.sqrt
 import kotlin.random.Random
 
-class GreedyClustererTest {
+class AgglomerativeClustererTest {
 
     private data class Item(val label: String, val embedding: FloatArray)
 
@@ -20,11 +20,11 @@ class GreedyClustererTest {
         val b2 = VectorMath.l2Normalize(floatArrayOf(0f, 0.98f, 0.02f))
 
         val items = listOf(Item("A", a1), Item("B", b1), Item("A", a2), Item("B", b2))
-        val clusters = GreedyClusterer.cluster(items, { it.embedding }, threshold = 0.8f)
+        val clusters = AgglomerativeClusterer.cluster(items, { it.embedding }, threshold = 0.8f)
 
         assertEquals(2, clusters.size)
         for (cluster in clusters) {
-            val labels = cluster.members.map { it.label }.toSet()
+            val labels = cluster.map { it.label }.toSet()
             assertEquals(1, labels.size) // each cluster is pure
         }
     }
@@ -34,7 +34,7 @@ class GreedyClustererTest {
         val items = (0 until 5).map { Item("$it", VectorMath.l2Normalize(floatArrayOf(1f, it.toFloat()))) }
         // threshold of 1.01 is unreachable by cosine similarity (max is 1.0),
         // so every item must seed its own cluster.
-        val clusters = GreedyClusterer.cluster(items, { it.embedding }, threshold = 1.01f)
+        val clusters = AgglomerativeClusterer.cluster(items, { it.embedding }, threshold = 1.01f)
         assertEquals(items.size, clusters.size)
     }
 
@@ -44,8 +44,8 @@ class GreedyClustererTest {
      * assignment brief: 5 distinct people, each with 4 appearances. Each
      * appearance's embedding is the mean of several noisy per-frame samples
      * of that person's shared base direction -- mirroring exactly how
-     * Appearance.meanEmbedding is actually built in production (an average
-     * over a track's real per-frame embeddings), not a single raw sample.
+     * a tracklet identity embedding is actually built in production (an average
+     * over several good per-frame embeddings), not a single raw sample.
      * Independent random directions are naturally near-orthogonal in a
      * high-dimensional space, which stands in for different people having
      * low embedding similarity. This is the same setup used to empirically
@@ -72,16 +72,16 @@ class GreedyClustererTest {
         }
         items.shuffle(random) // clustering shouldn't depend on chronological order alone
 
-        val clusters = GreedyClusterer.cluster(items, { it.embedding }, threshold = 0.5f)
+        val clusters = AgglomerativeClusterer.cluster(items, { it.embedding }, threshold = 0.5f)
 
         assertEquals("expected 5 unique people", peopleCount, clusters.size)
         for (cluster in clusters) {
             assertEquals(
-                "expected each person to have 4 appearances, got labels=${cluster.members.map { it.label }}",
+                "expected each person to have 4 appearances, got labels=${cluster.map { it.label }}",
                 appearancesPerPerson,
-                cluster.members.size
+                cluster.size
             )
-            val labels = cluster.members.map { it.label }.toSet()
+            val labels = cluster.map { it.label }.toSet()
             assertTrue("cluster should be pure (one person), got $labels", labels.size == 1)
         }
     }
