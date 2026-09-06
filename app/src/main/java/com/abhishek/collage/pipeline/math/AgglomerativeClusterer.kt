@@ -43,14 +43,35 @@ object AgglomerativeClusterer {
         threshold: Float
     ): List<List<T>> {
         if (items.size < 2) return items.map { listOf(it) }
-
         val embeddings = items.map(embeddingOf)
+        return clusterBySimilarity(items, threshold) { i, j ->
+            VectorMath.cosineSim(embeddings[i], embeddings[j])
+        }
+    }
+
+    /**
+     * Same algorithm, but the item-to-item similarity is supplied rather than
+     * derived from one embedding each.
+     *
+     * Exists because collapsing an item to a single averaged vector is itself a
+     * modelling choice, and not always the right one. A tracklet whose frames
+     * vary in quality loses its good frame to the average; comparing the
+     * underlying observations directly keeps it. [pairwiseSimilarity] is called
+     * once per pair of indices, so an expensive measure is fine here.
+     */
+    fun <T> clusterBySimilarity(
+        items: List<T>,
+        threshold: Float,
+        pairwiseSimilarity: (Int, Int) -> Float
+    ): List<List<T>> {
+        if (items.size < 2) return items.map { listOf(it) }
+
         val n = items.size
 
         // Precompute the full pairwise similarity matrix once; linkage scores
         // are then just averages of lookups.
         val sim = Array(n) { i ->
-            FloatArray(n) { j -> VectorMath.cosineSim(embeddings[i], embeddings[j]) }
+            FloatArray(n) { j -> if (i == j) 1f else pairwiseSimilarity(i, j) }
         }
 
         // Clusters as lists of original indices, so members stay identifiable

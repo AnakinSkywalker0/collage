@@ -26,13 +26,7 @@ data class FaceObservation(
     val embedding: FloatArray,
     val generousCrop: Bitmap,
     val sharpness: Float,
-    val touchesFrameEdge: Boolean,
-    /**
-     * False when ML Kit gave no usable eye landmarks and FaceAligner had to fall
-     * back to an unaligned box crop. Such an embedding is not comparable with an
-     * aligned one -- see [com.abhishek.collage.pipeline.FaceAligner.usesLandmarks].
-     */
-    val alignedByLandmarks: Boolean = true
+    val touchesFrameEdge: Boolean
 ) {
     override fun equals(other: Any?): Boolean = this === other
     override fun hashCode(): Int = System.identityHashCode(this)

@@ -1,7 +1,9 @@
 package com.abhishek.collage
 
+import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,7 +24,15 @@ import com.abhishek.collage.viewmodel.CollageViewModel
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // Pinned to the light styles rather than left to auto-detect. The app has a
+        // single fixed LIGHT theme (see CollageTheme), so on a phone set to dark
+        // mode the default would give light status-bar icons over our cream
+        // background and make them unreadable -- including in the screen
+        // recording.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+        )
         setContent {
             CollageTheme {
                 val viewModel: CollageViewModel = viewModel()
