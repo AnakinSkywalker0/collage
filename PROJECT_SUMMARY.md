@@ -23,7 +23,7 @@ Graded 50% identity/appearance-count accuracy, 30% code quality/architecture, 20
 | "Do not crop tightly… crop generously" | ✅ `cropGenerous`, separate from the embedder crop |
 | Save to gallery + share sheet | ✅ |
 | Don't hardcode the three clips' results | ✅ nothing sample-specific in the code |
-| README: build steps, embedding model, similarity threshold | ❌ not written — threshold is now known (0.35) |
+| README: build steps, embedding model, similarity threshold | ✅ written — all three, plus the threshold calibration evidence |
 | Debug APK | ✅ builds (`app/build/outputs/apk/debug/app-debug.apk`) |
 | ≤60s screen recording, all three collages legible | ❌ not started |
 
@@ -126,7 +126,7 @@ The over-merged cluster is two tight sub-groups ({0,9,17} at 0.87–0.89 interna
 
 1. Run Samples 2 and 3. Their ground truth isn't given — sanity-check by eye against the collage.
 2. Time a full run. `SAMPLE_INTERVAL_MS = 200` with `OPTION_CLOSEST` decodes ~150 non-keyframes per clip and may be slow; the screen recording budget is 60s total for all three videos. 300–400ms sampling is still ample for ~1.4s segments if needed.
-3. README: build/setup steps, embedding model + source/license, and **the chosen similarity threshold with the reasoning** (all three are explicitly required by the brief). Write the 6-vs-5 limitation honestly — the evidence is in "Known limitation" above.
+3. ~~README~~ — **done.** Build steps, MobileFaceNet + source, 0.35 with the raw-vs-centered calibration table and the sweep, and the 6-vs-5 limitation stated with its 0.425-vs-0.099 evidence.
 4. Commit and push to `AnakinSkywalker0/collage`.
 5. Build the final debug APK.
 6. Record the ≤60s screen capture: processing, appearance counts, and the finished collage for **all three** samples, each held on screen long enough to read.
@@ -143,5 +143,5 @@ The over-merged cluster is two tight sub-groups ({0,9,17} at 0.87–0.89 interna
 - `pipeline/math/AgglomerativeClusterer.kt` — deterministic average-linkage clustering.
 - `pipeline/PipelineOrchestrator.kt` — stage wiring; centers embeddings once, before anything compares two.
 - `pipeline/FaceEmbedder.kt` — MobileFaceNet, 112×112 RGB, `(x−127.5)/128`, 192-d, L2-normalized.
-- `README.md` — needs model, threshold, and build steps.
+- `README.md` — written; documents model, threshold + calibration, build steps, and the known limitation.
 - `test_normalization.py` — **obsolete**; its inputs were produced by the broken aligner. Delete or regenerate before relying on it.

@@ -1,227 +1,284 @@
-# iykyk Android Internship Assignment — Unique-Person Collage
+# Collage
 
-On-device pipeline: load a portrait video → detect faces → embed them → track
-appearances within the video → cluster appearances into unique people → pick
-the best shot per person → render a shareable collage.
+An Android app that takes a short video, finds every distinct person in it, counts how many
+times each one appears, and composes a single shareable collage with one generous portrait
+per person and their appearance count.
 
-## Stack
+Everything runs **on-device**. There is no backend, no network call, and no API key.
 
-- Kotlin, Jetpack Compose, minSdk 26
-- ML Kit Face Detection (`com.google.mlkit:face-detection`) — detection, landmarks, head-pose (Euler Y/Z), eyes-open + smiling classification
-- LiteRT (`com.google.ai.edge.litert`, the current name for TensorFlow Lite — TFLite is in maintenance mode as of 2026, LiteRT is a drop-in package swap with the same `Interpreter` API) running a bundled MobileFaceNet-class embedding model
-- Kotlin coroutines for all off-main-thread processing
-- `MediaMetadataRetriever` for frame sampling, `MediaStore` for gallery save, `FileProvider` + `ACTION_SEND` for sharing
-- No backend, no network calls — everything runs on-device
+---
 
-## Build / setup
+## Build and run
 
-1. **Embedding model — already bundled.** `app/src/main/assets/face_embedder.tflite`
-   (5,233,552 bytes) ships with the repo, so a fresh clone builds and runs
-   with no extra downloads. It is byte-identical to `mobilefacenet.tflite`
-   from https://github.com/MCarlomagno/FaceRecognitionAuth (MobileFaceNet,
-   112×112 RGB input, 192-d float output; see "Embedding model used" below).
-   To swap in a different model, replace that file and update
-   `FaceEmbedder.INPUT_SIZE` / `EMBEDDING_DIM` to match (check with Netron
-   if unsure).
+**Requirements**
 
-2. Open the project in Android Studio (or just `./gradlew` from terminal), let Gradle sync.
-3. Run on an emulator (API 26+) or physical device — no special permissions needed to pick or process a video (SAF handles that); `WRITE_EXTERNAL_STORAGE` is requested only on API 26-28 right before saving to gallery.
-4. Debug build: `./gradlew assembleDebug` → APK at `app/build/outputs/apk/debug/`.
-
-## Embedding model used
-
-MobileFaceNet-class TFLite model, 112×112 RGB input, single float embedding
-output (192-d as bundled; verified against the actual file's tensor shapes).
-Preprocessing: pixels scaled to roughly `[-1, 1]` via `(value - 127.5) / 128`.
-Output is L2-normalized in-app so cosine similarity reduces to a dot product
-everywhere downstream.
-
-**Face alignment matters more than any threshold.** These models are trained
-on tightly cropped, eye-aligned faces where the eyes sit at fixed canonical
-positions. `FaceAligner` applies a 2-point similarity transform on the ML Kit
-eye landmarks (rotate the eye line level, scale to canonical inter-eye
-distance, translate the eyes onto their canonical spots) to produce the
-112×112 input. If both eyes aren't available it falls back to a tight
-(15% margin) box crop.
-
-Note the deliberate split: the **generous** crop (50% margin) is what goes
-into the collage tile, per the assignment's "don't crop tightly" rule, while
-the **aligned** crop is the only thing the embedder ever sees. Feeding the
-generous crop to the embedder — which is what an earlier version did — puts
-the face at under half the frame width surrounded by background, way off the
-model's training distribution, and the embeddings end up encoding framing
-instead of identity. Symptom: wildly wrong person counts on every video.
-
-*(If you swap in a different embedding model, update this section with its
-name, source, and license before submitting — the assignment explicitly asks
-for this to be documented.)*
-
-## Similarity threshold chosen
-
-- **Appearance tracking (within one video)**: a detection is matched to an
-  active track if embedding cosine similarity > 0.5, **or** if IOU > 0.2 *and*
-  the embedding similarity is at least 0 (i.e. not obviously a different
-  person — see "Bugs found and fixed" below for why that floor exists).
-  Greedy best-score assignment per frame. A track closes — finalizing one
-  `Appearance` — after 1000ms with no match, which is what lets a blurred
-  whip-pan or a person leaving frame end a segment instead of bridging it
-  indefinitely, while tolerating a few consecutive missed detections during
-  fast head movement. Stale tracks are closed *before* matching each frame,
-  not after (also covered below).
-- **Identity clustering (across appearances)**: appearances are merged into
-  the same person via greedy threshold clustering at cosine similarity >
-  **0.5** against the running cluster centroid (`IdentityClusterer`, backed
-  by the framework-free `GreedyClusterer`).
-
-### How these were actually calibrated
-
-The Sample-1 simulation described below validated the *matching/clustering
-logic* against synthetic data, but not the real bundled model's actual
-similarity distribution — that can only come from running the real model.
-So the exact same alignment + preprocessing pipeline used on-device
-(`FaceAligner`'s 2-point transform → 112×112 → `(px-127.5)/128`) was run
-against `face_embedder.tflite` in Python, on real photos, to measure real
-genuine-vs-impostor cosine similarity:
-
-| Comparison | cosine similarity |
+| | |
 |---|---|
-| Different people (real photos) | **-0.06** |
-| Same person, small alignment jitter (2-6° rotation / a few px, matching normal frame-to-frame landmark noise) | **0.51 – 0.85** |
+| JDK | 17+ (Gradle toolchain targets Java 11 bytecode) |
+| Android SDK | compileSdk 37 |
+| Device / emulator | API 26 (Android 8.0) or newer |
 
-Two takeaways that directly shaped the values above:
+**Steps**
 
-1. **Different-person similarity is strongly negative** — 0.5 has a wide,
-   safe margin as a clustering threshold. This ruled out the embedding
-   model itself as the source of the on-device over-merging seen earlier;
-   that was a tracker logic bug (see below), not weak embeddings.
-2. **Same-person similarity is far less stable than expected** — ordinary
-   landmark noise between adjacent 200ms video frames swings it from 0.85
-   down to 0.51, right at the matching threshold. `iouThreshold` (0.3→0.2)
-   and `maxGapMs` (600→1000) were loosened specifically so the IOU fallback
-   reliably carries a real appearance through the frames where the
-   embedding dips just under 0.5 instead of splitting it into a new track
-   — this was the direct cause of an on-device over-count (one person
-   reported as 9 appearances instead of 4).
+```bash
+git clone https://github.com/AnakinSkywalker0/collage.git
+cd collage
+./gradlew assembleDebug
+```
 
-**Still tune against the Sample 1 worked example** (5 distinct people, each
-appearing 4 times, 20 appearances total, including two 2-person overlapping
-segments) before trusting either value on Samples 2/3 — two data points
-(one person pair) is a sanity check, not a full calibration. The values
-live in `AppearanceTracker` and `IdentityClusterer` constructors.
+The APK lands at `app/build/outputs/apk/debug/app-debug.apk`.
 
-### Clustering on best-observation embedding, not the track mean
+```bash
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
 
-A real 5-person clip (Sample 2) exposed a second real bug: on-device it
-merged 5 people into 3 clusters. Re-running the real model on one clean,
-correctly-aligned frame per person (same alignment/preprocessing as
-on-device) showed all 5 separating fine — max pairwise similarity 0.47,
-comfortably under 0.5, including the two most visually similar people (both
-men, both wearing glasses, 0.38). So the model and threshold weren't at
-fault; the gap was that `IdentityClusterer` clustered on `Appearance.
-meanEmbedding` — the mean over *every* observation in a track, including
-the blurry, off-angle, and mid-turn frames a real appearance inevitably
-contains at 5fps. Averaging those in drags the appearance's representative
-point away from the person's true identity centre, enough to tip a
-borderline pair over threshold. Fixed by clustering on each appearance's
-*best-quality* observation instead (`IdentityClusterer.representativeEmbedding`,
-reusing `QualityScorer`'s existing frontality/sharpness ranking) — the same
-properties that make a good collage shot also make a trustworthy embedding.
+Point `local.properties` at your SDK if Gradle cannot find it:
 
-### Bugs found and fixed on-device (post-wiring)
+```properties
+sdk.dir=/path/to/Android/Sdk
+```
 
-3. **FaceAligner built its similarity transform backwards.** The eye-alignment
-   matrix used `postTranslate/postRotate/postScale/postTranslate`, but `post*`
-   calls apply to the point in reverse order — so the destination shift was
-   scaled and rotated instead of applied last, misplacing every face off the
-   model's canonical eye positions. Same-frame similarity still looked high
-   (the misplacement is frame-to-frame consistent), which hid it; the tell
-   was different-person pairs scoring 0.5–0.67, deep in same-person range.
-   Fixed by switching to `pre*` calls in the same order, yielding
-   `T(dest) · S · R · T(-eye)` as intended (`FaceAligner.kt` documents why).
-4. **Track identity reference drifted via running mean.** Match decisions
-   compared candidates against a running mean over everything the track had
-   absorbed, so each wrong merge made the next one easier (measured: a track
-   absorbing 143 observations across a full 30s clip, similarity-to-origin
-   sliding 0.98 → 0.11 while similarity-to-mean stayed above threshold).
-   Fixed by matching against the track's fixed first observation only; the
-   running mean is gone, not just ignored.
-5. **Preprocessing ruled OUT as a suspect.** The exact on-device
-   alignment + model pipeline was re-run in Python (`test_normalization.py`,
-   `.venv` with `ai-edge-litert`) over 184 real aligned crops from a single
-   Sample 1 run, under three normalizations (`(px-127.5)/128`,
-   `(px-127.5)/127.5`, `px/255`): all three gave near-identical consecutive-
-   frame similarities (mean 0.77–0.80, 22–29/183 pairs below 0.5). No scheme
-   separates better, so the remaining spread is content (appearance
-   boundaries, two-person frames), not input scaling.
+No extra setup is needed. **The embedding model is committed to the repo** at
+`app/src/main/assets/face_embedder.tflite` (5.0 MB) — nothing is downloaded at build or run
+time. `androidResources { noCompress += "tflite" }` in `app/build.gradle.kts` keeps the model
+uncompressed in the APK so LiteRT can memory-map it directly.
 
-### Bugs found and fixed while calibrating (pre-wiring simulation)
+Run the unit tests with:
 
-This algorithm can't be exercised end-to-end without the Android SDK / an
-emulator, so before wiring it up for real, the exact tracking + clustering
-logic was ported to a standalone Python script and run against synthetic
-data shaped like the Sample 1 worked example (5 people, 4 appearances each,
-two 2-person overlaps, with per-frame embedding noise and occasional missed
-detections). That caught two real bugs that would otherwise have only shown
-up as wrong counts on-device, with no obvious cause:
+```bash
+./gradlew test
+```
 
-1. **Stale tracks were being matched one frame too late.** Gap-closing ran
-   *after* that frame's matching instead of before, so a track that should
-   already have been dead could still greedily steal a detection just
-   because no fresher candidate outscored it — silently merging two
-   different people's appearances into one track across a gap. Fixed by
-   closing expired tracks at the top of each frame's loop, before matching.
-2. **High IOU alone could win a match against a clearly-different
-   embedding.** Two people standing close together (spatially overlapping
-   boxes) could have their identities swapped between tracks, since IOU says
-   nothing about *who* someone is. Fixed by requiring embedding similarity
-   to at least clear a floor (0, i.e. "not obviously a different person")
-   whenever a match is justified by IOU rather than by embedding similarity
-   alone.
+26 tests cover the framework-free maths core — vector operations, IoU geometry, the clustering
+algorithm, and the appearance-counting arithmetic. They are plain JVM JUnit and need no device
+or Robolectric.
 
-With both fixes, the simulation recovered the correct 5 clusters of 4
-appearances across a wide 0.35-0.55 clustering-threshold band and across
-noise levels harsher than the baseline. `IdentityClusterer`'s default
-moved from an untested guess of 0.67 (which turned out too high to ever
-merge anything) to 0.5. This is documented so you know *why* those numbers
-are what they are, not just what they are — and so you re-run the same kind
-of sanity check if you change the matching logic again.
+**Using the app:** pick a video, watch per-stage progress, and the collage appears with each
+person's count. Save to gallery or share from there.
 
-`app/src/test/java/.../pipeline/math/` has unit tests for the pure
-algorithmic core (`VectorMath`, `GeometryMath`, `GreedyClusterer`),
-including a regression test (`GreedyClustererTest.cluster_sampleOneShapedScenario...`)
-that encodes this exact calibration scenario. Run `./gradlew test` before
-you do anything else — it's fast, needs no emulator, and will tell you
-immediately if a future change breaks the clustering math.
+---
 
-## Architecture
+## Embedding model
+
+**MobileFaceNet**, bundled as `app/src/main/assets/face_embedder.tflite`, executed through
+**LiteRT** (`com.google.ai.edge.litert`).
+
+| Property | Value |
+|---|---|
+| Input | 112 × 112, RGB, NHWC float32 |
+| Preprocessing | `(x − 127.5) / 128` per channel |
+| Output | 192-dimensional embedding, L2-normalized |
+| Similarity | Cosine — a plain dot product, since vectors are unit length |
+| Size | 5,233,552 bytes |
+| Source | [MCarlomagno/FaceRecognitionAuth](https://github.com/MCarlomagno/FaceRecognitionAuth) (`mobilefacenet.tflite`) |
+
+The file was confirmed to be a genuine MobileFaceNet rather than a renamed stand-in by
+inspecting the flatbuffer's tensor scopes, which carry `MobileFaceNet/Conv_*` and
+`Logits/LinearConv1x1` names.
+
+**Detection** is Google **ML Kit Face Detection** in `PERFORMANCE_MODE_ACCURATE` with
+`LANDMARK_MODE_ALL` and `CLASSIFICATION_MODE_ALL` — the landmarks drive alignment, and the
+eyes-open and smiling probabilities feed the representative-shot score.
+
+### Two different crops, deliberately
+
+The crop fed to the embedder and the crop shown in the collage are **not** the same image, and
+this is intentional:
+
+- **Embedder crop** — `FaceAligner` produces a tight 112 × 112 patch, rotated and scaled so the
+  eyes land on ArcFace's canonical positions (38.29, 51.69) and (73.53, 51.50). MobileFaceNet
+  was trained on exactly this geometry; feeding it anything else degrades the embedding badly.
+- **Collage crop** — `FaceCropUtils.cropGenerous` takes a wide crop with head and shoulders, per
+  the brief's instruction not to crop tightly. It clamps its margins when a neighbouring face
+  would otherwise be pulled into frame, checking perpendicular overlap so that a face directly
+  *above* cannot shrink the left and right margins.
+
+Conflating the two would mean either a bad embedding or an unpleasantly tight portrait.
+
+---
+
+## Similarity threshold
+
+**0.35 cosine, measured on centered embeddings.**
+
+The word *centered* carries the whole weight of that number, so it needs explaining.
+
+### Why raw cosine does not work
+
+Every face in one video shares a camera, a lighting setup, a colour grade, and often a
+background. MobileFaceNet encodes all of that alongside identity, so every embedding from a
+single clip carries a large common component. Measured on a real 30-second sample:
+
+| Pair | Raw cosine |
+|---|---|
+| Average over all pairs | **0.601** |
+| Two people known to be different (they share the frame at 10.2 s) | **0.684** |
+| A second known-different pair | **0.494** |
+
+Two *different* people scoring 0.684 is higher than the 0.5-ish threshold a textbook would
+suggest. Any threshold in that range separates nothing — it sits below the impostor level it is
+supposed to reject.
+
+### The fix
+
+`VectorMath.centered` subtracts the mean of all embeddings in the video and re-normalizes. That
+removes the shared component while leaving identity intact. The same pairs afterwards:
+
+| Pair | Raw | Centered |
+|---|---|---|
+| Known-different (10.2 s) | 0.684 | **0.010** |
+| Known-different (second) | 0.494 | **0.109** |
+| Distribution average | 0.601 | **−0.049** |
+
+Impostors now sit near zero and the same person across frames sits above 0.9. There is a wide
+empty band between them, which is where the threshold belongs.
+
+Centering happens **once**, in `PipelineOrchestrator`, before anything compares two vectors — so
+tracking and clustering both operate on the same scale. An earlier version centered only before
+clustering while `TrackletBuilder` still gated on raw cosine at 0.55, which is *below* the 0.684
+that impostors measure, so tracklets ran straight through cuts.
+
+### Choosing 0.35
+
+Sweeping the threshold against the sample's 231 tracklet pairs:
+
+| Threshold | Result |
+|---|---|
+| 0.30 / 0.35 / 0.38 | **identical output** — a stable plateau |
+| 0.40 | 7 clusters, starts shedding single appearances |
+| 0.42 | 8 clusters |
+| 0.45+ | 9 clusters, badly fragmented |
+
+0.35 is the centre of that plateau, which gives the most margin in both directions. It is not a
+value picked because it happened to produce a pleasing answer.
+
+**The other thresholds**, all on centered embeddings, live in `TrackletBuilder`: IoU 0.2,
+step-wise similarity 0.45, anchor similarity 0.25 against the tracklet's first frame, and a
+500 ms maximum gap. Frames are sampled every 200 ms (5 fps), and an absence longer than 600 ms
+ends an appearance.
+
+---
+
+## How it works
+
+```
+extract frames (5 fps)                         FrameExtractor
+  -> detect faces + landmarks                  FaceDetectorStage
+  -> align to 112x112 on the eye line          FaceAligner
+  -> embed (MobileFaceNet, 192-d)              FaceEmbedder
+  -> CENTER all embeddings, once               VectorMath.centered
+  -> build tracklets (frame-to-frame runs)     TrackletBuilder
+  -> cluster tracklets into people             IdentityClusterer
+  -> split each person's timeline on gaps      AppearanceSplitter
+  -> pick the representative shot              QualityScorer
+  -> compose the collage                       CollageComposer
+```
 
 ```
 ui/            Compose screens (Home, Processing, Result) + theme
-viewmodel/     CollageViewModel — owns pipeline state as a StateFlow
-pipeline/      FrameExtractor, FaceDetectorStage, FaceEmbedder, ImageQuality,
-               FaceCropUtils, AppearanceTracker, IdentityClusterer,
-               QualityScorer, PipelineOrchestrator (wires it all together)
-pipeline/math/ VectorMath, GeometryMath, GreedyClusterer — the framework-free
-               algorithmic core (no android.* imports), unit-tested directly
-               under plain JVM JUnit; AppearanceTracker/IdentityClusterer are
-               thin Android-shaped adapters over these
-collage/       CollageComposer (Canvas-based grid renderer), CollageSaver
-               (MediaStore), ShareUtil (FileProvider + ACTION_SEND)
-model/         FrameSample, FaceObservation, Appearance, Person, ProcessingState
+viewmodel/     CollageViewModel — pipeline state as StateFlow
+pipeline/      extraction, detection, alignment, embedding, tracking,
+               clustering, appearance splitting, quality scoring
+pipeline/math/ VectorMath, GeometryMath, AgglomerativeClusterer,
+               TimelineSegmenter — pure functions, all unit tested
+collage/       CollageComposer, CollageSaver, ShareUtil
+model/         FrameSample, FaceObservation, Tracklet, Appearance, Person
 ```
 
-Faces are cropped twice, deliberately differently: **generously** (50% margin,
-clamped to frame bounds, backing off from neighbouring faces) for the stored
-collage tile — never a tight bbox crop, per the assignment brief — and
-**tight + eye-aligned** (112×112 via `FaceAligner`) for the embedding model,
-which was trained on that exact framing.
+### Identity is resolved before appearances are counted
 
-## Known limitations / things to verify before submitting
+This ordering is the main design decision. The obvious alternative — track faces, then count the
+tracks — makes the count only as good as frame-to-frame tracking. Tracking is a *spatial* signal,
+and it is weakest exactly where these clips are hardest: at a hard cut between shots.
 
-- Appearance/person counts still need a final on-device check against the
-  Sample 1 worked example (5 people × 4 appearances) after the FaceAligner
-  and anchor fixes above — re-run all three samples, not just Sample 1.
-- Two people with heavily overlapping bounding boxes and unusually similar embeddings can still, rarely, get their identities swapped between tracks — a known, documented residual risk (see "Bugs found and fixed"), not something worth chasing to zero since tightening it further caused far more common track fragmentation in testing.
-- Emulator inference is slower than a real device; if timing matters for your recording, do a final pass on physical hardware.
-- The collage layout (2 cols ≤4 people, 3 cols beyond) hasn't been visually tuned for very large person counts — check it looks right on your actual results.
-- `./gradlew test` only covers the framework-free math core; the Android-coupled stages (frame extraction, ML Kit detection, TFLite inference, MediaStore/FileProvider) are only exercised by actually running the app.
+In cut-based portrait video, consecutive shots frame different people's heads in the same part of
+the frame, so at a cut the outgoing and incoming bounding boxes overlap heavily. **IoU is high
+precisely when identity has changed.** A tracker leaning on IoU bridges the cut, chains two people
+into one track, and the count is then wrong with no way to recover.
+
+So the pipeline clusters first, then splits each person's own timeline on temporal gaps — which is
+exactly the brief's definition of an appearance, one continuous visible segment.
+
+A consequence worth knowing before touching `TrackletBuilder`: **tracklets are allowed to
+over-fragment.** One segment split into two tracklets costs nothing — both cluster to the same
+person, their observations pool, and the timeline split rejoins them. A tracklet spanning two
+*people* is unrecoverable. The thresholds there are asymmetric for that reason, and every match
+must satisfy spatial **and** identity continuity.
+
+### Clustering
+
+`AgglomerativeClusterer` — average linkage, merging the globally best pair each round until
+nothing exceeds the threshold. It replaced a single-pass greedy clusterer whose output depended on
+the order items were visited, and whose running-mean centroid drifted with each merge so that
+every subsequent merge became easier. Average linkage always re-reads actual members, so **the
+output is a function of the embeddings alone and repeat runs are identical.** O(n³) on a few dozen
+tracklets is free.
+
+A tracklet's identity embedding is the mean of its **top-5 quality observations**. The full mean
+dilutes identity with blurry and mid-turn frames; a single best frame stakes everything on one
+frame's noise.
+
+---
+
+## Measured results
+
+Sample 1, whose ground truth the brief gives as **5 people × 4 appearances = 20**:
+
+```
+151 frames -> 164 detections -> 22 tracklets -> 6 people, 20 appearances
+```
+
+**What is right:**
+
+- **20 appearances — exactly the ground truth.**
+- **Segmentation is correct.** The 18 single-person segments are all 1.2–1.4 s, and there are
+  exactly two double-occupancy moments, at 10.2–11.4 s and 20.2–21.4 s. Those are precisely where
+  the brief says A & B and C & D share the frame. 18 + 2 = 20.
+- **Deterministic.** Repeat runs on the same video give byte-identical output.
+
+**What is not:** the 20 appearances group into **6 identities instead of 5**. Two clusters are
+exactly right at 4 appearances each; one holds 6 and is two people merged, with the remainder
+scattered as 3, 1 and 2.
+
+### Known limitation — this is the model's ceiling, not a loose threshold
+
+It would be easy to present the 6-vs-5 gap as something a little more tuning would fix. It is not,
+and the evidence says so specifically.
+
+The over-merged cluster is two internally tight sub-groups — one at 0.865–0.892 similarity
+internally, the other at 0.802–0.945 — bound to each other at **0.425 average linkage**. Splitting
+them apart and giving each its correct fourth appearance would need some candidate pair to score
+above that. The best candidate available anywhere is **+0.099**, and most are negative.
+
+Worse, a merge that *must* happen for the correct answer sits at **0.402** — only 23 thousandths
+below the wrong merge at 0.425. **No threshold can order those two correctly**, because the
+embedding evidence genuinely points the wrong way. The sweep confirms it: raising the threshold
+fragments correct clusters long before it splits the incorrect one.
+
+The limit is MobileFaceNet's separability on this footage. Closing it means a stronger embedding
+model, not a different number in `IdentityClusterer`.
+
+---
+
+## A bug worth recording
+
+`FaceAligner` composes its alignment matrix with `post*` calls. Android's `Matrix` composes `post`
+as `M = X · M` and `pre` as `M = M · X` — opposite directions. A version of this code used `pre*`
+with the same call order, which ran the transform backwards and placed the left eye at
+**(−140.96, −314.23)**, entirely off a 112 × 112 canvas. The crop sampled source pixels around
+y ≈ 1055–1338 while the face sat at y ≈ 400.
+
+**MobileFaceNet was embedding background, never a face**, on every detection of every run. That
+single bug explained every symptom at once: different people scoring as similar (their backgrounds
+match), the same person scoring as different (the background changed), and repeat runs disagreeing,
+because near-textureless input leaves embeddings dominated by numerical noise.
+
+The numeric proof is kept as a comment in `FaceAligner.kt` so that the revert does not get
+"simplified" back.
+
+---
+
+## Tech stack
+
+Kotlin 2.2.10 · Jetpack Compose (BOM 2026.02.01) · AGP 9.4.0 · ML Kit Face Detection 16.1.7 ·
+LiteRT 2.1.0 · kotlinx-coroutines · minSdk 26 / targetSdk 37
