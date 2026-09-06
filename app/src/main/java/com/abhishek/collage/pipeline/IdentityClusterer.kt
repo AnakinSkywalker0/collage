@@ -1,8 +1,11 @@
 package com.abhishek.collage.pipeline
 
+import android.util.Log
 import com.abhishek.collage.model.Tracklet
 import com.abhishek.collage.pipeline.math.AgglomerativeClusterer
 import com.abhishek.collage.pipeline.math.VectorMath
+
+private const val TAG = "CollagePipeline"
 
 /**
  * Groups [Tracklet]s that belong to the same real person.
@@ -44,11 +47,64 @@ class IdentityClusterer(
         // and no threshold separates identities. Index-aligned with `tracklets`.
         val centered = VectorMath.centered(tracklets.map { representativeEmbedding(it) })
         val embeddingByIndex = tracklets.indices.associateWith { centered[it] }
-        return AgglomerativeClusterer.cluster(
+        val clusters = AgglomerativeClusterer.cluster(
             items = tracklets.indices.toList(),
             embeddingOf = { embeddingByIndex.getValue(it) },
             threshold = similarityThreshold
-        ).map { indices -> PersonCluster(indices.map { tracklets[it] }) }
+        )
+        logAlignmentDiagnostics(clusters, tracklets, embeddingByIndex)
+        return clusters.map { indices -> PersonCluster(indices.map { tracklets[it] }) }
+    }
+
+    /** TEMPORARY calibration logging -- strip before submission. */
+    private fun logAlignmentDiagnostics(
+        clusters: List<List<Int>>,
+        tracklets: List<Tracklet>,
+        embeddingByIndex: Map<Int, FloatArray>
+    ) {
+        clusters.forEachIndexed { i, cluster ->
+            val obs = cluster.flatMap { tracklets[it].observations }
+            val widths = obs.map { it.boundingBox.width() }.sorted()
+            val yaw = obs.map { kotlin.math.abs(it.eulerY) }.sorted()
+            val roll = obs.map { kotlin.math.abs(it.eulerZ) }.sorted()
+            // Average pairwise similarity BETWEEN this cluster's own tracklets --
+            // the number that says whether the embedder recognises this person as
+            // themselves at all. Never measured before now.
+            val internal = mutableListOf<Float>()
+            for (a in cluster.indices) {
+                for (b in a + 1 until cluster.size) {
+                    internal.add(
+                        VectorMath.cosineSim(
+                            embeddingByIndex.getValue(cluster[a]),
+                            embeddingByIndex.getValue(cluster[b])
+                        )
+                    )
+                }
+            }
+            Log.i(
+                TAG,
+                ("DIAG  c$i n=${cluster.size} obs=${obs.size} " +
+                    "faceW med=${widths[widths.size / 2]} min=${widths.first()} max=${widths.last()} " +
+                    "|yaw| med=%.0f max=%.0f |roll| med=%.0f " +
+                    "edge=${obs.count { it.touchesFrameEdge }} " +
+                    "internalSim=%s").format(
+                    yaw[yaw.size / 2], yaw.last(), roll[roll.size / 2],
+                    if (internal.isEmpty()) "n/a" else
+                        "avg=%.3f min=%.3f".format(internal.average(), internal.min())
+                )
+            )
+        }
+        for (i in clusters.indices) {
+            val row = clusters.indices.filter { it > i }.joinToString(" ") { j ->
+                val sim = clusters[i].flatMap { a ->
+                    clusters[j].map { b ->
+                        VectorMath.cosineSim(embeddingByIndex.getValue(a), embeddingByIndex.getValue(b))
+                    }
+                }.average()
+                "c$j=%.3f".format(sim)
+            }
+            if (row.isNotEmpty()) Log.i(TAG, "DIAG  c$i vs $row")
+        }
     }
 
 

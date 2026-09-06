@@ -147,7 +147,8 @@ class PipelineOrchestrator(context: Context) {
                         embedding = it,
                         generousCrop = d.collageCrop,
                         sharpness = d.sharpness,
-                        touchesFrameEdge = d.touchesEdge
+                        touchesFrameEdge = d.touchesEdge,
+                        alignedByLandmarks = FaceAligner.usesLandmarks(d.raw.leftEye, d.raw.rightEye)
                     )
                 }
             }
